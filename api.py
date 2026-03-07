@@ -188,7 +188,6 @@ def process_image_task(task_id, params, api_key_id):
                 else:
                     db.update_task_status(task_id, 'failed')
                     db.add_task_log(task_id, "Image upload failed.")
-                    # Release account on upload failure
                     db.release_account(api_key_id, account['email'])
                     return
 
@@ -224,6 +223,10 @@ def process_image_task(task_id, params, api_key_id):
             api_task_id = str(resp_json['data']['data']['taskId'])
             db.update_task_external_data(task_id, api_task_id, token)
             db.add_task_log(task_id, f"API Task ID: {api_task_id}")
+
+            ref_urls = resp_json['data']['data'].get('inputUserImageUrls') or []
+            if ref_urls:
+                db.update_task_reference_urls(task_id, ref_urls)
 
             for _ in range(300):
                 if _shutdown_event.wait(2):
@@ -344,6 +347,10 @@ def process_video_task(task_id, params, api_key_id):
             api_task_id = str(resp_json['data']['data']['taskId'])
             db.update_task_external_data(task_id, api_task_id, token)
             db.add_task_log(task_id, f"API Task ID: {api_task_id}")
+
+            ref_urls = resp_json['data']['data'].get('inputUserImageUrls') or []
+            if ref_urls:
+                db.update_task_reference_urls(task_id, ref_urls)
             
             for _ in range(600):
                 if _shutdown_event.wait(5):
@@ -660,7 +667,18 @@ def resume_incomplete_tasks():
     print("[STARTUP] Crash recovery complete.")
     print("=" * 50)
 
-# --- API Routes ---
+TASK_FIELDS_BY_MODE = {
+    'image': ['task_id', 'mode', 'status', 'result_url', 'prompt', 'model', 'size', 'resolution', 'reference_image_urls', 'logs', 'created_at'],
+    'video': ['task_id', 'mode', 'status', 'result_url', 'prompt', 'model', 'size', 'resolution', 'duration', 'reference_image_urls', 'logs', 'created_at'],
+    'tts':   ['task_id', 'mode', 'status', 'result_url', 'prompt', 'model', 'logs', 'created_at'],
+}
+
+def filter_task_fields(task):
+    """Filters task dict fields based on mode."""
+    if not task:
+        return task
+    fields = TASK_FIELDS_BY_MODE.get(task.get('mode'), list(task.keys()))
+    return {k: task[k] for k in fields if k in task}
 
 @app.errorhandler(Exception)
 def handle_exception(e):
@@ -692,7 +710,15 @@ def generate_image():
         }), 429
     
     task_id = str(uuid.uuid4())
-    db.create_task(api_key_id, task_id, 'image')
+    model = data.get('model', 'MODEL_FOUR_NANO_BANANA_PRO')
+    size = data.get('imageSize', 'SIXTEEN_BY_NINE')
+    resolution = data.get('resolution', '2K') if model == 'MODEL_FOUR_NANO_BANANA_PRO' else None
+    db.create_task(api_key_id, task_id, 'image',
+                   prompt=data.get('prompt'),
+                   model=model,
+                   size=size,
+                   resolution=resolution,
+                   duration=None)
     
     threading.Thread(target=process_image_task, args=(task_id, data, api_key_id)).start()
     return jsonify({"task_id": task_id})
@@ -718,7 +744,16 @@ def generate_video():
         }), 429
     
     task_id = str(uuid.uuid4())
-    db.create_task(api_key_id, task_id, 'video')
+    model = data.get('model', 'SORA2')
+    size = data.get('size', 'SIXTEEN_BY_NINE')
+    resolution = '720p'
+    duration = 8 if model == 'VEO_3_1' else 10
+    db.create_task(api_key_id, task_id, 'video',
+                   prompt=data.get('prompt'),
+                   model=model,
+                   size=size,
+                   resolution=resolution,
+                   duration=duration)
     
     threading.Thread(target=process_video_task, args=(task_id, data, api_key_id)).start()
     return jsonify({"task_id": task_id})
@@ -786,7 +821,7 @@ def get_task_status(task_id):
     task = db.get_task(api_key_id, task_id)
     if not task:
         return jsonify({"error": "Task not found"}), 404
-    return jsonify(task)
+    return jsonify(filter_task_fields(task))
 
 @app.route('/api/status', methods=['GET'])
 def get_all_tasks_status():
